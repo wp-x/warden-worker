@@ -110,6 +110,13 @@ impl Device {
             .transpose()
     }
 
+    pub fn is_push_device(&self) -> bool {
+        matches!(
+            DeviceType::from_i32(self.r#type),
+            DeviceType::Android | DeviceType::Ios
+        )
+    }
+
     pub async fn insert(&self, db: &D1Database) -> Result<(), AppError> {
         query!(
             db,
@@ -189,21 +196,15 @@ impl Device {
         Ok(())
     }
 
-    pub async fn set_push_registration(
+    pub async fn set_push_token(
         &mut self,
         db: &D1Database,
         push_token: Option<&str>,
-        ensure_push_uuid: bool,
     ) -> Result<(), AppError> {
-        if ensure_push_uuid && self.push_uuid.is_none() {
-            self.push_uuid = Some(uuid::Uuid::new_v4().to_string());
-        }
-
         let now = db::now_string();
         query!(
             db,
-            "UPDATE devices SET push_uuid = ?1, push_token = ?2, updated_at = ?3 WHERE identifier = ?4 AND user_id = ?5",
-            self.push_uuid.as_deref(),
+            "UPDATE devices SET push_token = ?1, updated_at = ?2 WHERE identifier = ?3 AND user_id = ?4",
             push_token,
             &now,
             &self.identifier,
@@ -215,6 +216,25 @@ impl Device {
         .map_err(|_| AppError::Database)?;
 
         self.push_token = push_token.map(str::to_owned);
+        self.updated_at = now;
+        Ok(())
+    }
+
+    pub async fn persist_push_uuid(&mut self, db: &D1Database) -> Result<(), AppError> {
+        let now = db::now_string();
+        query!(
+            db,
+            "UPDATE devices SET push_uuid = ?1, updated_at = ?2 WHERE identifier = ?3 AND user_id = ?4",
+            self.push_uuid.as_deref(),
+            &now,
+            &self.identifier,
+            &self.user_id
+        )
+        .map_err(|_| AppError::Database)?
+        .run()
+        .await
+        .map_err(|_| AppError::Database)?;
+
         self.updated_at = now;
         Ok(())
     }

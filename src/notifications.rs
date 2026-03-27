@@ -14,6 +14,8 @@ pub const INITIAL_RESPONSE: [u8; 3] = [b'{', b'}', RECORD_SEPARATOR];
 pub const USER_KIND_TAG: &str = "k:user";
 pub const ANONYMOUS_KIND_TAG: &str = "k:anon";
 
+// ── UpdateType ──────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(i32)]
 pub enum UpdateType {
@@ -35,6 +37,8 @@ pub enum UpdateType {
     AuthRequestResponse = 16,
     None = 100,
 }
+
+// ── Connection model ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -91,6 +95,8 @@ impl ConnectionAttachment {
     }
 }
 
+// ── Selector ────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PublishSelector {
@@ -119,35 +125,87 @@ impl PublishSelector {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PublishEnvelope {
-    pub selector: PublishSelector,
-    pub message: Vec<u8>,
-}
+// ── Internal publish protocol (structured events) ───────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum InternalPublishRequest {
-    Envelope(PublishEnvelope),
+    UserUpdate(UserUpdatePublish),
+    FolderUpdate(FolderUpdatePublish),
     CipherUpdate(CipherUpdatePublish),
+    SendUpdate(SendUpdatePublish),
+    AuthRequest(AuthRequestPublish),
+    AuthResponse(AuthResponsePublish),
+    AnonymousAuthResponse(AnonymousAuthResponsePublish),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserUpdatePublish {
+    pub user_id: String,
+    pub update_type: i32,
+    pub date: String,
+    pub context_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderUpdatePublish {
+    pub user_id: String,
+    pub update_type: i32,
+    pub folder_id: String,
+    pub revision_date: String,
+    pub context_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CipherUpdatePublish {
     pub user_id: String,
+    pub update_type: i32,
     pub cipher_id: String,
+    pub payload_user_id: Option<String>,
     pub organization_id: Option<String>,
     pub collection_ids: Option<Vec<String>>,
-    pub revision_date: String,
+    pub revision_date: Option<String>,
     pub context_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-struct InitialMessage {
-    protocol: String,
-    version: i32,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendUpdatePublish {
+    pub user_id: String,
+    pub update_type: i32,
+    pub send_id: String,
+    pub payload_user_id: Option<String>,
+    pub revision_date: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthRequestPublish {
+    pub user_id: String,
+    pub auth_request_id: String,
+    pub context_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthResponsePublish {
+    pub user_id: String,
+    pub auth_request_id: String,
+    pub context_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnonymousAuthResponsePublish {
+    pub token: String,
+    pub user_id: String,
+    pub auth_request_id: String,
+}
+
+// ── Tag helpers ─────────────────────────────────────────────────────
 
 pub fn user_tag(user_id: &str) -> String {
     format!("u:{user_id}")
@@ -155,6 +213,14 @@ pub fn user_tag(user_id: &str) -> String {
 
 pub fn anonymous_tag(token: &str) -> String {
     format!("a:{token}")
+}
+
+// ── Protocol helpers ────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct InitialMessage {
+    protocol: String,
+    version: i32,
 }
 
 pub fn is_initial_message(message: &str) -> bool {
@@ -169,12 +235,14 @@ pub fn is_initial_message(message: &str) -> bool {
         })
 }
 
+// ── MessagePack message builders (used by NotifyDo) ─────────────────
+
 pub fn create_ping() -> Vec<u8> {
     serialize(&Value::Array(vec![6.into()]))
 }
 
 pub fn build_user_update_message(
-    update_type: UpdateType,
+    update_type: i32,
     user_id: &str,
     date: &str,
     context_id: Option<&str>,
@@ -190,7 +258,7 @@ pub fn build_user_update_message(
 }
 
 pub fn build_folder_update_message(
-    update_type: UpdateType,
+    update_type: i32,
     folder_id: &str,
     user_id: &str,
     revision_date: &str,
@@ -211,7 +279,7 @@ pub fn build_folder_update_message(
 }
 
 pub fn build_cipher_update_message(
-    update_type: UpdateType,
+    update_type: i32,
     cipher_id: &str,
     user_id: Option<&str>,
     organization_id: Option<&str>,
@@ -256,7 +324,7 @@ pub fn build_cipher_update_message(
 }
 
 pub fn build_send_update_message(
-    update_type: UpdateType,
+    update_type: i32,
     send_id: &str,
     user_id: Option<&str>,
     revision_date: &str,
@@ -285,7 +353,7 @@ pub fn build_auth_request_message(
             ("Id".into(), auth_request_id.into()),
             ("UserId".into(), user_id.into()),
         ],
-        UpdateType::AuthRequest,
+        UpdateType::AuthRequest as i32,
         context_id,
     )
 }
@@ -300,7 +368,7 @@ pub fn build_auth_response_message(
             ("Id".into(), auth_request_id.into()),
             ("UserId".into(), user_id.into()),
         ],
-        UpdateType::AuthRequestResponse,
+        UpdateType::AuthRequestResponse as i32,
         context_id,
     )
 }
@@ -311,10 +379,12 @@ pub fn build_anonymous_auth_response_message(user_id: &str, auth_request_id: &st
             ("Id".into(), auth_request_id.into()),
             ("UserId".into(), user_id.into()),
         ],
-        UpdateType::AuthRequestResponse,
+        UpdateType::AuthRequestResponse as i32,
         user_id,
     )
 }
+
+// ── Publish helpers (called by handlers) ────────────────────────────
 
 pub async fn publish_user_update(
     env: &Env,
@@ -323,12 +393,14 @@ pub async fn publish_user_update(
     date: &str,
     context_id: Option<&str>,
 ) -> Result<(), AppError> {
-    publish_prebuilt(
+    publish_internal(
         env,
-        PublishEnvelope {
-            selector: PublishSelector::user(user_id),
-            message: build_user_update_message(update_type, user_id, date, context_id),
-        },
+        &InternalPublishRequest::UserUpdate(UserUpdatePublish {
+            user_id: user_id.to_string(),
+            update_type: update_type as i32,
+            date: date.to_string(),
+            context_id: context_id.map(str::to_owned),
+        }),
     )
     .await
 }
@@ -350,18 +422,15 @@ pub async fn publish_folder_update(
     revision_date: &str,
     context_id: Option<&str>,
 ) -> Result<(), AppError> {
-    publish_prebuilt(
+    publish_internal(
         env,
-        PublishEnvelope {
-            selector: PublishSelector::user(user_id),
-            message: build_folder_update_message(
-                update_type,
-                folder_id,
-                user_id,
-                revision_date,
-                context_id,
-            ),
-        },
+        &InternalPublishRequest::FolderUpdate(FolderUpdatePublish {
+            user_id: user_id.to_string(),
+            update_type: update_type as i32,
+            folder_id: folder_id.to_string(),
+            revision_date: revision_date.to_string(),
+            context_id: context_id.map(str::to_owned),
+        }),
     )
     .await
 }
@@ -378,20 +447,18 @@ pub async fn publish_cipher_update(
     revision_date: Option<&str>,
     context_id: Option<&str>,
 ) -> Result<(), AppError> {
-    publish_prebuilt(
+    publish_internal(
         env,
-        PublishEnvelope {
-            selector: PublishSelector::user(selector_user_id),
-            message: build_cipher_update_message(
-                update_type,
-                cipher_id,
-                payload_user_id,
-                organization_id,
-                collection_ids,
-                revision_date,
-                context_id,
-            ),
-        },
+        &InternalPublishRequest::CipherUpdate(CipherUpdatePublish {
+            user_id: selector_user_id.to_string(),
+            update_type: update_type as i32,
+            cipher_id: cipher_id.to_string(),
+            payload_user_id: payload_user_id.map(str::to_owned),
+            organization_id: organization_id.map(str::to_owned),
+            collection_ids,
+            revision_date: revision_date.map(str::to_owned),
+            context_id: context_id.map(str::to_owned),
+        }),
     )
     .await
 }
@@ -404,17 +471,15 @@ pub async fn publish_send_update(
     payload_user_id: Option<&str>,
     revision_date: &str,
 ) -> Result<(), AppError> {
-    publish_prebuilt(
+    publish_internal(
         env,
-        PublishEnvelope {
-            selector: PublishSelector::user(selector_user_id),
-            message: build_send_update_message(
-                update_type,
-                send_id,
-                payload_user_id,
-                revision_date,
-            ),
-        },
+        &InternalPublishRequest::SendUpdate(SendUpdatePublish {
+            user_id: selector_user_id.to_string(),
+            update_type: update_type as i32,
+            send_id: send_id.to_string(),
+            payload_user_id: payload_user_id.map(str::to_owned),
+            revision_date: revision_date.to_string(),
+        }),
     )
     .await
 }
@@ -425,12 +490,13 @@ pub async fn publish_auth_request(
     auth_request_id: &str,
     context_id: Option<&str>,
 ) -> Result<(), AppError> {
-    publish_prebuilt(
+    publish_internal(
         env,
-        PublishEnvelope {
-            selector: PublishSelector::user(user_id),
-            message: build_auth_request_message(user_id, auth_request_id, context_id),
-        },
+        &InternalPublishRequest::AuthRequest(AuthRequestPublish {
+            user_id: user_id.to_string(),
+            auth_request_id: auth_request_id.to_string(),
+            context_id: context_id.map(str::to_owned),
+        }),
     )
     .await
 }
@@ -441,12 +507,13 @@ pub async fn publish_auth_response(
     auth_request_id: &str,
     context_id: Option<&str>,
 ) -> Result<(), AppError> {
-    publish_prebuilt(
+    publish_internal(
         env,
-        PublishEnvelope {
-            selector: PublishSelector::user(user_id),
-            message: build_auth_response_message(user_id, auth_request_id, context_id),
-        },
+        &InternalPublishRequest::AuthResponse(AuthResponsePublish {
+            user_id: user_id.to_string(),
+            auth_request_id: auth_request_id.to_string(),
+            context_id: context_id.map(str::to_owned),
+        }),
     )
     .await
 }
@@ -454,20 +521,18 @@ pub async fn publish_auth_response(
 pub async fn publish_anonymous_update(
     env: &Env,
     token: &str,
-    message: Vec<u8>,
+    user_id: &str,
+    auth_request_id: &str,
 ) -> Result<(), AppError> {
-    publish_prebuilt(
+    publish_internal(
         env,
-        PublishEnvelope {
-            selector: PublishSelector::anonymous(token),
-            message,
-        },
+        &InternalPublishRequest::AnonymousAuthResponse(AnonymousAuthResponsePublish {
+            token: token.to_string(),
+            user_id: user_id.to_string(),
+            auth_request_id: auth_request_id.to_string(),
+        }),
     )
     .await
-}
-
-pub async fn publish_prebuilt(env: &Env, envelope: PublishEnvelope) -> Result<(), AppError> {
-    publish_internal(env, &InternalPublishRequest::Envelope(envelope)).await
 }
 
 pub async fn publish_internal(env: &Env, request: &InternalPublishRequest) -> Result<(), AppError> {
@@ -503,9 +568,11 @@ pub async fn publish_internal(env: &Env, request: &InternalPublishRequest) -> Re
     Ok(())
 }
 
+// ── MessagePack internals ───────────────────────────────────────────
+
 fn create_update(
     payload: Vec<(Value, Value)>,
-    update_type: UpdateType,
+    update_type: i32,
     context_id: Option<&str>,
 ) -> Vec<u8> {
     use rmpv::Value as V;
@@ -517,7 +584,7 @@ fn create_update(
         "ReceiveMessage".into(),
         V::Array(vec![V::Map(vec![
             ("ContextId".into(), convert_option(context_id)),
-            ("Type".into(), (update_type as i32).into()),
+            ("Type".into(), update_type.into()),
             ("Payload".into(), payload.into()),
         ])]),
     ]);
@@ -527,7 +594,7 @@ fn create_update(
 
 fn create_anonymous_update(
     payload: Vec<(Value, Value)>,
-    update_type: UpdateType,
+    update_type: i32,
     user_id: &str,
 ) -> Vec<u8> {
     use rmpv::Value as V;
@@ -538,7 +605,7 @@ fn create_anonymous_update(
         V::Nil,
         "AuthRequestResponseRecieved".into(),
         V::Array(vec![V::Map(vec![
-            ("Type".into(), (update_type as i32).into()),
+            ("Type".into(), update_type.into()),
             ("Payload".into(), payload.into()),
             ("UserId".into(), user_id.into()),
         ])]),
@@ -649,7 +716,7 @@ mod tests {
     #[test]
     fn build_user_update_message_targets_receive_message() {
         let bytes = build_user_update_message(
-            UpdateType::SyncSettings,
+            UpdateType::SyncSettings as i32,
             "user-1",
             "2026-03-14T00:00:00.000Z",
             None,

@@ -1,0 +1,396 @@
+#![allow(dead_code)]
+
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use web_sys::UrlSearchParams;
+use worker::{
+    wasm_bindgen::JsValue, Cache, Env, Fetch, Headers, Method, Request, RequestInit, Response,
+};
+
+use crate::{error::AppError, models::device::Device};
+
+const PUSH_TOKEN_CACHE_URL: &str = "https://push-token.internal/relay-token";
+const DEFAULT_PUSH_RELAY_URI: &str = "https://push.bitwarden.com";
+const DEFAULT_PUSH_IDENTITY_URI: &str = "https://identity.bitwarden.com";
+
+// ── PushConfig ──────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct PushConfig {
+    pub relay_uri: String,
+    pub identity_uri: String,
+    pub installation_id: String,
+    pub installation_key: String,
+}
+
+/// Try to build a `PushConfig` from environment variables.
+///
+/// Returns `None` when `PUSH_ENABLED` is not `"true"`.
+/// Returns `Err` when push is enabled but required secrets are missing.
+pub fn push_config(env: &Env) -> Result<Option<PushConfig>, AppError> {
+    let enabled = env
+        .var("PUSH_ENABLED")
+        .ok()
+        .is_some_and(|v| v.to_string() == "true");
+    if !enabled {
+        return Ok(None);
+    }
+
+    let relay_uri = env
+        .var("PUSH_RELAY_URI")
+        .ok()
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| DEFAULT_PUSH_RELAY_URI.to_string());
+
+    let identity_uri = env
+        .var("PUSH_IDENTITY_URI")
+        .ok()
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| DEFAULT_PUSH_IDENTITY_URI.to_string());
+
+    let installation_id = env
+        .secret("PUSH_INSTALLATION_ID")
+        .map(|v| v.to_string())
+        .map_err(|_| {
+            log::error!("PUSH_ENABLED is true but PUSH_INSTALLATION_ID secret is missing");
+            AppError::Internal
+        })?;
+
+    let installation_key = env
+        .secret("PUSH_INSTALLATION_KEY")
+        .map(|v| v.to_string())
+        .map_err(|_| {
+            log::error!("PUSH_ENABLED is true but PUSH_INSTALLATION_KEY secret is missing");
+            AppError::Internal
+        })?;
+
+    Ok(Some(PushConfig {
+        relay_uri,
+        identity_uri,
+        installation_id,
+        installation_key,
+    }))
+}
+
+// ── OAuth2 token management ─────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct AuthPushToken {
+    access_token: String,
+    expires_in: i32,
+}
+
+async fn fetch_relay_token(cfg: &PushConfig) -> Result<(String, i32), AppError> {
+    let client_id = format!("installation.{}", cfg.installation_id);
+
+    let params = UrlSearchParams::new().map_err(|_| AppError::Internal)?;
+    params.append("grant_type", "client_credentials");
+    params.append("scope", "api.push");
+    params.append("client_id", &client_id);
+    params.append("client_secret", &cfg.installation_key);
+    let body = params.to_string();
+
+    let url = format!("{}/connect/token", cfg.identity_uri);
+
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post).with_body(Some(body.into()));
+    let mut req = Request::new_with_init(&url, &init).map_err(AppError::Worker)?;
+    req.headers_mut()
+        .map_err(AppError::Worker)?
+        .set("Content-Type", "application/x-www-form-urlencoded")
+        .map_err(AppError::Worker)?;
+    req.headers_mut()
+        .map_err(AppError::Worker)?
+        .set("Accept", "application/json")
+        .map_err(AppError::Worker)?;
+
+    let mut response = Fetch::Request(req).send().await.map_err(AppError::Worker)?;
+    if !(200..300).contains(&response.status_code()) {
+        let body = response.text().await.unwrap_or_default();
+        log::error!(
+            "Push token request failed ({}): {body}",
+            response.status_code()
+        );
+        return Err(AppError::Internal);
+    }
+
+    let token: AuthPushToken = response.json().await.map_err(AppError::Worker)?;
+    Ok((token.access_token, token.expires_in))
+}
+
+async fn get_relay_token(cfg: &PushConfig) -> Result<String, AppError> {
+    let cache = Cache::default();
+    if let Some(mut cached) = cache
+        .get(PUSH_TOKEN_CACHE_URL, false)
+        .await
+        .map_err(AppError::Worker)?
+    {
+        if let Ok(token) = cached.text().await {
+            if !token.is_empty() {
+                return Ok(token);
+            }
+        }
+    }
+
+    let (access_token, expires_in) = fetch_relay_token(cfg).await?;
+    let max_age = (expires_in / 2).max(60);
+
+    let headers = Headers::new();
+    headers
+        .set("Cache-Control", &format!("max-age={max_age}"))
+        .map_err(AppError::Worker)?;
+    headers
+        .set("Content-Type", "text/plain")
+        .map_err(AppError::Worker)?;
+
+    let response = Response::ok(&access_token)
+        .map_err(AppError::Worker)?
+        .with_headers(headers);
+    let _ = cache.put(PUSH_TOKEN_CACHE_URL, response).await;
+
+    Ok(access_token)
+}
+
+// ── Device registration / unregistration ────────────────────────────
+
+fn ensure_push_uuid(device: &mut Device) -> bool {
+    if device.push_uuid.is_none() {
+        device.push_uuid = Some(uuid::Uuid::new_v4().to_string());
+        return true;
+    }
+    false
+}
+
+pub async fn register_push_device(cfg: &PushConfig, device: &mut Device) -> Result<bool, AppError> {
+    if !device.is_push_device() {
+        return Ok(false);
+    }
+
+    let Some(push_token) = device.push_token.clone() else {
+        log::warn!(
+            "Skipping push registration for device {} — no push_token",
+            device.identifier
+        );
+        return Ok(false);
+    };
+
+    let push_uuid_created = ensure_push_uuid(device);
+    let push_uuid = device.push_uuid.as_deref().unwrap();
+
+    let data = json!({
+        "deviceId": push_uuid,
+        "pushToken": push_token,
+        "userId": device.user_id,
+        "type": device.r#type,
+        "identifier": device.identifier,
+        "installationId": cfg.installation_id,
+    });
+
+    let token = get_relay_token(cfg).await?;
+    let url = format!("{}/push/register", cfg.relay_uri);
+    post_to_relay(&url, &token, &data, true).await?;
+    Ok(push_uuid_created)
+}
+
+pub async fn unregister_push_device(
+    cfg: &PushConfig,
+    push_uuid: Option<&str>,
+) -> Result<(), AppError> {
+    let Some(push_uuid) = push_uuid else {
+        return Ok(());
+    };
+
+    let token = get_relay_token(cfg).await?;
+    let url = format!("{}/push/delete/{push_uuid}", cfg.relay_uri);
+
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post);
+    let mut req = Request::new_with_init(&url, &init).map_err(AppError::Worker)?;
+    req.headers_mut()
+        .map_err(AppError::Worker)?
+        .set("Authorization", &format!("Bearer {token}"))
+        .map_err(AppError::Worker)?;
+
+    let response = Fetch::Request(req).send().await.map_err(AppError::Worker)?;
+    if !(200..300).contains(&response.status_code()) {
+        log::warn!(
+            "Push device unregistration returned non-success status: {}",
+            response.status_code()
+        );
+    }
+    Ok(())
+}
+
+// ── Push notification sending ───────────────────────────────────────
+
+pub async fn send_to_push_relay(cfg: &PushConfig, payload: &Value) -> Result<(), AppError> {
+    let token = get_relay_token(cfg).await?;
+    let url = format!("{}/push/send", cfg.relay_uri);
+    post_to_relay(&url, &token, payload, false).await
+}
+
+// ── Push payload builders ───────────────────────────────────────────
+
+// In this project, org feature is not supported, so we set organizationId and collectionIds to null
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevicePushInfo {
+    pub push_uuid: Option<String>,
+    pub identifier: String,
+}
+
+pub fn build_cipher_push_payload(
+    user_id: &str,
+    cipher_id: &str,
+    user_id_payload: Option<&str>,
+    revision_date: Option<&str>,
+    update_type: i32,
+    device: Option<&DevicePushInfo>,
+) -> Value {
+    json!({
+        "userId": user_id,
+        "organizationId": null,
+        "deviceId": device.and_then(|d| d.push_uuid.as_deref()),
+        "identifier": device.map(|d| d.identifier.as_str()),
+        "type": update_type,
+        "payload": {
+            "id": cipher_id,
+            "userId": user_id_payload,
+            "organizationId": null,
+            "collectionIds": null,
+            "revisionDate": revision_date,
+        },
+        "clientType": null,
+        "installationId": null,
+    })
+}
+
+pub fn build_user_push_payload(
+    user_id: &str,
+    date: &str,
+    update_type: i32,
+    device: Option<&DevicePushInfo>,
+) -> Value {
+    json!({
+        "userId": user_id,
+        "organizationId": null,
+        "deviceId": device.and_then(|d| d.push_uuid.as_deref()),
+        "identifier": device.map(|d| d.identifier.as_str()),
+        "type": update_type,
+        "payload": {
+            "userId": user_id,
+            "date": date,
+        },
+        "clientType": null,
+        "installationId": null,
+    })
+}
+
+pub fn build_folder_push_payload(
+    user_id: &str,
+    folder_id: &str,
+    revision_date: &str,
+    update_type: i32,
+    device: Option<&DevicePushInfo>,
+) -> Value {
+    json!({
+        "userId": user_id,
+        "organizationId": null,
+        "deviceId": device.and_then(|d| d.push_uuid.as_deref()),
+        "identifier": device.map(|d| d.identifier.as_str()),
+        "type": update_type,
+        "payload": {
+            "id": folder_id,
+            "userId": user_id,
+            "revisionDate": revision_date,
+        },
+        "clientType": null,
+        "installationId": null,
+    })
+}
+
+pub fn build_send_push_payload(
+    user_id: &str,
+    send_id: &str,
+    send_user_id: Option<&str>,
+    revision_date: &str,
+    update_type: i32,
+    device: Option<&DevicePushInfo>,
+) -> Value {
+    json!({
+        "userId": user_id,
+        "organizationId": null,
+        "deviceId": device.and_then(|d| d.push_uuid.as_deref()),
+        "identifier": device.map(|d| d.identifier.as_str()),
+        "type": update_type,
+        "payload": {
+            "id": send_id,
+            "userId": send_user_id,
+            "revisionDate": revision_date,
+        },
+        "clientType": null,
+        "installationId": null,
+    })
+}
+
+pub fn build_auth_request_push_payload(
+    user_id: &str,
+    auth_request_id: &str,
+    update_type: i32,
+    device: Option<&DevicePushInfo>,
+) -> Value {
+    json!({
+        "userId": user_id,
+        "organizationId": null,
+        "deviceId": device.and_then(|d| d.push_uuid.as_deref()),
+        "identifier": device.map(|d| d.identifier.as_str()),
+        "type": update_type,
+        "payload": {
+            "userId": user_id,
+            "id": auth_request_id,
+        },
+        "clientType": null,
+        "installationId": null,
+    })
+}
+
+// ── Internal helpers ────────────────────────────────────────────────
+
+async fn post_to_relay(
+    url: &str,
+    token: &str,
+    data: &Value,
+    fail_on_http_error: bool,
+) -> Result<(), AppError> {
+    let body = serde_json::to_string(data).map_err(|_| AppError::Internal)?;
+
+    let mut init = RequestInit::new();
+    init.with_method(Method::Post)
+        .with_body(Some(JsValue::from_str(&body)));
+
+    let mut req = Request::new_with_init(url, &init).map_err(AppError::Worker)?;
+    let headers = req.headers_mut().map_err(AppError::Worker)?;
+    headers
+        .set("Content-Type", "application/json")
+        .map_err(AppError::Worker)?;
+    headers
+        .set("Accept", "application/json")
+        .map_err(AppError::Worker)?;
+    headers
+        .set("Authorization", &format!("Bearer {token}"))
+        .map_err(AppError::Worker)?;
+
+    let mut response = Fetch::Request(req).send().await.map_err(AppError::Worker)?;
+    if !(200..300).contains(&response.status_code()) {
+        let body = response.text().await.unwrap_or_default();
+        log::error!(
+            "Push relay POST to {url} failed ({}): {body}",
+            response.status_code()
+        );
+        if fail_on_http_error {
+            return Err(AppError::Internal);
+        }
+    }
+    Ok(())
+}

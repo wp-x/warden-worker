@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use worker::Env;
 
-use crate::{auth::Claims, db, error::AppError, models::device::Device};
+use crate::{auth::Claims, db, error::AppError, models::device::Device, push};
 
 fn required_header(headers: &HeaderMap, name: &str) -> Result<String, AppError> {
     headers
@@ -125,9 +125,30 @@ async fn upsert_device_token(
 
     let db = db::get_db(&env)?;
     let mut device = current_device(&db, &claims, &device_id).await?;
-    device
-        .set_push_registration(&db, Some(&push_token), true)
-        .await?;
+    // Also check that push_uuid is present before skipping registration.
+    // Unlike vaultwarden, which pre-allocates push_uuid at Device::new() time,
+    // we only generate it during relay registration. If a previous registration
+    // call saved the token but failed at the relay step, push_uuid will be
+    // missing; in that case we must NOT early-return so the retry can complete
+    // the relay registration.
+    if device.push_token.as_deref() == Some(push_token.as_str()) && device.push_uuid.is_some() {
+        log::debug!(
+            "Device {} for user {} is already registered and token is identical",
+            device_id,
+            claims.sub
+        );
+        return Ok(Json(json!({})));
+    }
+
+    device.set_push_token(&db, Some(&push_token)).await?;
+
+    if let Some(cfg) = push::push_config(&env)? {
+        let push_uuid_created = push::register_push_device(&cfg, &mut device).await?;
+        if push_uuid_created {
+            device.persist_push_uuid(&db).await?;
+        }
+    }
+
     Ok(Json(json!({})))
 }
 
@@ -160,7 +181,13 @@ async fn clear_device_token(
 ) -> Result<Json<Value>, AppError> {
     let db = db::get_db(&env)?;
     let mut device = current_device(&db, &claims, &device_id).await?;
-    device.set_push_registration(&db, None, false).await?;
+    let Some(cfg) = push::push_config(&env)? else {
+        return Ok(Json(json!({})));
+    };
+
+    device.set_push_token(&db, None).await?;
+    push::unregister_push_device(&cfg, device.push_uuid.as_deref()).await?;
+
     Ok(Json(json!({})))
 }
 

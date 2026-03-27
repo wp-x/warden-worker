@@ -67,6 +67,15 @@ run_worker_first = ["/api/*", "/identity/*", "/notifications/*"]
 # If unset/invalid, the Worker uses a default capacity and grows as needed.
 # SYNC_RESPONSE_PREALLOC_BYTES = "1048576"
 
+# Push Notification Configuration (optional)
+# To enable mobile push notifications via Bitwarden's relay service:
+# 1. Get installation ID and key from https://bitwarden.com/host/
+# 2. Set PUSH_ENABLED = "true"
+# 3. Add secrets: wrangler secret put PUSH_INSTALLATION_ID && wrangler secret put PUSH_INSTALLATION_KEY
+# PUSH_ENABLED = "false"
+# PUSH_RELAY_URI = "https://push.bitwarden.com"
+# PUSH_IDENTITY_URI = "https://identity.bitwarden.com"
+
 # Number of days to keep soft-deleted items before auto-purging.
 # Defaults to 30 days if not set. Set to 0 to disable auto-purge.
 # TRASH_AUTO_DELETE_DAYS = "30"

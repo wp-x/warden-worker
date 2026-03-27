@@ -13,6 +13,7 @@ mod error;
 mod handlers;
 mod models;
 mod notifications;
+mod push;
 mod router;
 
 /// Base URL extracted from the incoming request, used for config endpoint.
