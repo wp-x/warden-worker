@@ -232,8 +232,7 @@ async fn load_user_by_id(db: &worker::D1Database, user_id: &str) -> Result<User,
         .await
         .map_err(|_| AppError::Database)?;
 
-    let user_value =
-        user_value.ok_or_else(|| AppError::Unauthorized("Invalid refresh token".to_string()))?;
+    let user_value = user_value.ok_or_else(|| AppError::BadRequest("invalid_grant".to_string()))?;
     serde_json::from_value(user_value).map_err(|_| AppError::Internal)
 }
 
@@ -625,38 +624,44 @@ pub async fn token(
             )
         }
         "refresh_token" => {
-            let refresh_token = required_field(payload.refresh_token.as_deref(), "refresh_token")?;
-            validate_password_scope(payload.scope.as_deref(), false)?;
+            // When a refresh token is invalid or missing we need to respond with an HTTP BadRequest (400)
+            // It also needs to return a json which holds at least a key `error` with the value `invalid_grant`
+            // See the link below for details
+            // https://github.com/bitwarden/clients/blob/2ee158e720a5e7dbe3641caf80b569e97a1dd91b/libs/common/src/services/api.service.ts#L1786-L1797
+            let refresh_token = required_field(payload.refresh_token.as_deref(), "refresh_token")
+                .map_err(|_| AppError::BadRequest("invalid_grant".to_string()))?;
+            validate_password_scope(payload.scope.as_deref(), false)
+                .map_err(|_| AppError::BadRequest("invalid_grant".to_string()))?;
 
             let jwt_refresh_secret = env.secret("JWT_REFRESH_SECRET")?.to_string();
             let refresh_key = Hs256Key::new(jwt_refresh_secret.as_bytes());
             let token = UntrustedToken::new(&refresh_token)
-                .map_err(|_| AppError::Unauthorized("Invalid refresh token".to_string()))?;
+                .map_err(|_| AppError::BadRequest("invalid_grant".to_string()))?;
             let token = jwt_compact::alg::Hs256
                 .validator::<RefreshClaims>(&refresh_key)
                 .validate(&token)
-                .map_err(|_| AppError::Unauthorized("Invalid refresh token".to_string()))?;
+                .map_err(|_| AppError::BadRequest("invalid_grant".to_string()))?;
             let time_options = jwt_time_options();
             token
                 .claims()
                 .validate_expiration(&time_options)
-                .map_err(|_| AppError::Unauthorized("Invalid refresh token".to_string()))?;
+                .map_err(|_| AppError::BadRequest("invalid_grant".to_string()))?;
             token
                 .claims()
                 .validate_maturity(&time_options)
-                .map_err(|_| AppError::Unauthorized("Invalid refresh token".to_string()))?;
+                .map_err(|_| AppError::BadRequest("invalid_grant".to_string()))?;
 
             let refresh_claims = token.into_parts().1.custom;
             let mut device = Device::find_by_refresh_token(&db, &refresh_claims.device_token)
                 .await?
-                .ok_or_else(|| AppError::Unauthorized("Invalid refresh token".to_string()))?;
+                .ok_or_else(|| AppError::BadRequest("invalid_grant".to_string()))?;
             let user = load_user_by_id(&db, &device.user_id).await?;
 
             if !constant_time_eq(
                 refresh_claims.sstamp.as_bytes(),
                 user.security_stamp.as_bytes(),
             ) {
-                return Err(AppError::Unauthorized("Invalid refresh token".to_string()));
+                return Err(AppError::BadRequest("invalid_grant".to_string()));
             }
 
             device.touch(&db).await?;
