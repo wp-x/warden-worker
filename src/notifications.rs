@@ -254,8 +254,10 @@ pub async fn publish_user_update(
         context_id,
     );
     let selector = PublishSelector::user(user_id);
-    send_ws_to_do(env, &selector, &ws_bytes).await;
-    push::push_user_update(env, user_id, update_type as i32, date, context_id).await;
+    futures_util::join!(
+        send_ws_to_do(env, &selector, &ws_bytes),
+        push::push_user_update(env, user_id, update_type as i32, date, context_id),
+    );
 }
 
 pub async fn publish_user_logout(env: &Env, user_id: &str, date: &str, context_id: Option<&str>) {
@@ -283,16 +285,17 @@ pub async fn publish_folder_update(
         context_id,
     );
     let selector = PublishSelector::user(user_id);
-    send_ws_to_do(env, &selector, &ws_bytes).await;
-    push::push_folder_update(
-        env,
-        user_id,
-        update_type as i32,
-        folder_id,
-        revision_date,
-        context_id,
-    )
-    .await;
+    futures_util::join!(
+        send_ws_to_do(env, &selector, &ws_bytes),
+        push::push_folder_update(
+            env,
+            user_id,
+            update_type as i32,
+            folder_id,
+            revision_date,
+            context_id,
+        ),
+    );
 }
 
 pub async fn publish_cipher_update(
@@ -320,16 +323,17 @@ pub async fn publish_cipher_update(
         context_id,
     );
     let selector = PublishSelector::user(user_id);
-    send_ws_to_do(env, &selector, &ws_bytes).await;
-    push::push_cipher_update(
-        env,
-        user_id,
-        update_type as i32,
-        cipher_id,
-        revision_date,
-        context_id,
-    )
-    .await;
+    futures_util::join!(
+        send_ws_to_do(env, &selector, &ws_bytes),
+        push::push_cipher_update(
+            env,
+            user_id,
+            update_type as i32,
+            cipher_id,
+            revision_date,
+            context_id,
+        ),
+    );
 }
 
 pub async fn publish_send_update(
@@ -353,16 +357,17 @@ pub async fn publish_send_update(
         context_id,
     );
     let selector = PublishSelector::user(user_id);
-    send_ws_to_do(env, &selector, &ws_bytes).await;
-    push::push_send_update(
-        env,
-        user_id,
-        update_type as i32,
-        send_id,
-        revision_date,
-        context_id,
-    )
-    .await;
+    futures_util::join!(
+        send_ws_to_do(env, &selector, &ws_bytes),
+        push::push_send_update(
+            env,
+            user_id,
+            update_type as i32,
+            send_id,
+            revision_date,
+            context_id,
+        ),
+    );
 }
 
 pub async fn publish_auth_request(
@@ -380,8 +385,10 @@ pub async fn publish_auth_request(
         context_id,
     );
     let selector = PublishSelector::user(user_id);
-    send_ws_to_do(env, &selector, &ws_bytes).await;
-    push::push_auth_request(env, user_id, auth_request_id, context_id).await;
+    futures_util::join!(
+        send_ws_to_do(env, &selector, &ws_bytes),
+        push::push_auth_request(env, user_id, auth_request_id, context_id),
+    );
 }
 
 pub async fn publish_auth_response(
@@ -399,8 +406,10 @@ pub async fn publish_auth_response(
         context_id,
     );
     let selector = PublishSelector::user(user_id);
-    send_ws_to_do(env, &selector, &ws_bytes).await;
-    push::push_auth_response(env, user_id, auth_request_id, context_id).await;
+    futures_util::join!(
+        send_ws_to_do(env, &selector, &ws_bytes),
+        push::push_auth_response(env, user_id, auth_request_id, context_id),
+    );
 }
 
 pub async fn publish_anonymous_update(

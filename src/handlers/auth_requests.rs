@@ -164,20 +164,20 @@ pub async fn put_auth_request(
         auth_request.response_device_id = Some(payload.device_identifier);
         auth_request.update(&db).await?;
 
-        notifications::publish_anonymous_update(
-            &env,
-            &auth_request.id,
-            &auth_request.user_id,
-            &auth_request.id,
-        )
-        .await;
-        notifications::publish_auth_response(
-            &env,
-            &auth_request.user_id,
-            &auth_request.id,
-            Some(&claims.device),
-        )
-        .await;
+        futures_util::join!(
+            notifications::publish_anonymous_update(
+                &env,
+                &auth_request.id,
+                &auth_request.user_id,
+                &auth_request.id,
+            ),
+            notifications::publish_auth_response(
+                &env,
+                &auth_request.user_id,
+                &auth_request.id,
+                Some(&claims.device),
+            ),
+        );
     } else {
         auth_request.delete(&db).await?;
         auth_request.set_approved(false);
