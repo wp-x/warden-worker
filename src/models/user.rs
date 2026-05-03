@@ -1,5 +1,7 @@
 use constant_time_eq::constant_time_eq;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use worker::{query, D1Database};
 
 use crate::{crypto::verify_password, error::AppError};
 
@@ -59,6 +61,17 @@ impl PasswordVerification {
 }
 
 impl User {
+    pub async fn find_by_email(db: &D1Database, email: &str) -> Result<Option<Self>, AppError> {
+        let row: Option<Value> = query!(db, "SELECT * FROM users WHERE email = ?1", email)
+            .map_err(|_| AppError::Database)?
+            .first(None)
+            .await
+            .map_err(|_| AppError::Database)?;
+
+        row.map(|row| serde_json::from_value(row).map_err(|_| AppError::Internal))
+            .transpose()
+    }
+
     pub async fn verify_master_password(
         &self,
         provided_hash: &str,
@@ -334,6 +347,8 @@ pub struct RotateAccountKeys {
 pub struct RotateAccountData {
     pub ciphers: Vec<crate::models::cipher::CipherRequestData>,
     pub folders: Vec<RotateFolderData>,
+    #[serde(default)]
+    pub sends: Vec<crate::models::send::SendRequestData>,
 }
 
 #[derive(Debug, Deserialize)]

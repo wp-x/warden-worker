@@ -127,6 +127,8 @@ pub struct Cipher {
     pub folder_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 
@@ -158,6 +160,7 @@ pub struct CipherDBModel {
     pub favorite: i32,
     pub folder_id: Option<String>,
     pub deleted_at: Option<String>,
+    pub archived_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -173,6 +176,7 @@ impl From<CipherDBModel> for Cipher {
             favorite: val.favorite != 0,
             folder_id: val.folder_id,
             deleted_at: val.deleted_at,
+            archived_at: val.archived_at,
             created_at: val.created_at,
             updated_at: val.updated_at,
             object: default_object(),
@@ -222,6 +226,7 @@ impl Serialize for Cipher {
         response_map.insert("revisionDate".to_string(), json!(self.updated_at));
         response_map.insert("creationDate".to_string(), json!(self.created_at));
         response_map.insert("deletedDate".to_string(), json!(self.deleted_at));
+        response_map.insert("archivedDate".to_string(), json!(self.archived_at));
         response_map.insert("attachments".to_string(), json!(self.attachments));
 
         if let Some(data_obj) = self.data.as_object() {

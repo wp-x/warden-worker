@@ -1,5 +1,4 @@
 use axum::{extract::State, http::HeaderMap, Json};
-use chrono::Utc;
 use glob_match::glob_match;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -12,9 +11,10 @@ use crate::{
     crypto::{generate_salt, hash_password_for_storage},
     db,
     error::AppError,
-    handlers::attachments,
+    handlers::{attachments, sends},
     models::{
         cipher::CipherData,
+        device::Device,
         sync::Profile,
         user::{
             AvatarData, ChangeKdfRequest, ChangePasswordRequest, MasterPasswordUnlockData,
@@ -22,6 +22,8 @@ use crate::{
             RotateKeyRequest, User,
         },
     },
+    notifications::{self, UpdateType},
+    push,
 };
 
 const KDF_TYPE_PBKDF2: i32 = 0;
@@ -236,7 +238,7 @@ pub async fn register(
     .await?;
 
     let db = db::get_db(&env)?;
-    let now = Utc::now().to_rfc3339();
+    let now = db::now_string();
 
     // Only store kdf_memory and kdf_parallelism for Argon2id, clear for PBKDF2
     let (kdf_memory, kdf_parallelism) = if payload.kdf == KDF_TYPE_ARGON2ID {
@@ -403,29 +405,6 @@ pub async fn get_tasks() -> Result<Json<Value>, AppError> {
     })))
 }
 
-/// GET /api/auth-requests
-///
-/// Bitwarden clients may call this to fetch pending "login with device" auth requests.
-/// This minimal implementation doesn't support device auth requests, so we always return an empty list.
-///
-/// Vaultwarden currently aliases this endpoint to `/api/auth-requests/pending`.
-#[worker::send]
-pub async fn get_auth_requests(claims: Claims) -> Result<Json<Value>, AppError> {
-    get_auth_requests_pending(claims).await
-}
-
-/// GET /api/auth-requests/pending
-///
-/// Stub: always returns an empty list.
-#[worker::send]
-pub async fn get_auth_requests_pending(_claims: Claims) -> Result<Json<Value>, AppError> {
-    Ok(Json(json!({
-        "data": [],
-        "continuationToken": null,
-        "object": "list"
-    })))
-}
-
 #[worker::send]
 pub async fn get_profile(
     claims: Claims,
@@ -471,7 +450,7 @@ pub async fn post_profile(
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     let mut user: User = serde_json::from_value(user_value).map_err(|_| AppError::Internal)?;
-    let now = Utc::now().to_rfc3339();
+    let now = db::now_string();
 
     user.name = Some(payload.name);
     user.updated_at = now.clone();
@@ -490,6 +469,14 @@ pub async fn post_profile(
 
     let two_factor_enabled = two_factor_enabled(&db, user_id).await?;
     let profile = Profile::from_user(user, two_factor_enabled)?;
+
+    notifications::publish_user_update(
+        (*env).clone(),
+        claims.sub,
+        UpdateType::SyncSettings,
+        now,
+        Some(claims.device),
+    );
 
     Ok(Json(profile))
 }
@@ -530,7 +517,7 @@ pub async fn put_avatar(
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     let mut user: User = serde_json::from_value(user_value).map_err(|_| AppError::Internal)?;
-    let now = Utc::now().to_rfc3339();
+    let now = db::now_string();
 
     user.avatar_color = payload.avatar_color;
     user.updated_at = now.clone();
@@ -549,6 +536,14 @@ pub async fn put_avatar(
 
     let two_factor_enabled = two_factor_enabled(&db, user_id).await?;
     let profile = Profile::from_user(user, two_factor_enabled)?;
+
+    notifications::publish_user_update(
+        (*env).clone(),
+        claims.sub,
+        UpdateType::SyncSettings,
+        now,
+        Some(claims.device),
+    );
 
     Ok(Json(profile))
 }
@@ -583,10 +578,15 @@ pub async fn delete_account(
         return Err(AppError::Unauthorized("Invalid password".to_string()));
     }
 
+    push::unregister_push_devices_by_user(&env, user_id).await;
+
     if attachments::attachments_enabled(env.as_ref()) {
         let keys = attachments::list_attachment_keys_for_user(&db, user_id).await?;
         attachments::delete_storage_objects(env.as_ref(), &keys).await?;
     }
+
+    // Delete all user's sends and associated storage objects
+    sends::delete_user_sends(&db, env.as_ref(), user_id).await?;
 
     // Delete all user's ciphers
     query!(&db, "DELETE FROM ciphers WHERE user_id = ?1", user_id)
@@ -650,7 +650,7 @@ pub async fn post_password(
 
     // Generate new security stamp and update timestamp
     let new_security_stamp = Uuid::new_v4().to_string();
-    let now = Utc::now().to_rfc3339();
+    let now = db::now_string();
 
     // Update user record
     query!(
@@ -668,6 +668,8 @@ pub async fn post_password(
     .map_err(|_| AppError::Database)?
     .run()
     .await?;
+
+    notifications::publish_user_logout((*env).clone(), claims.sub, now, Some(claims.device));
 
     Ok(Json(json!({})))
 }
@@ -823,7 +825,7 @@ pub async fn post_rotatekey(
         ));
     }
 
-    let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let now = db::now_string();
 
     // Update all folders with new encrypted names (batch operation)
     // Skip null folder IDs (Bitwarden client bug: https://github.com/bitwarden/clients/issues/8453)
@@ -898,6 +900,17 @@ pub async fn post_rotatekey(
     db::execute_in_batches(&db, cipher_statements, batch_size).await?;
     db::execute_in_batches(&db, attachment_statements, batch_size).await?;
 
+    // Rotate sends
+    sends::rotate_user_sends(
+        &db,
+        env.as_ref(),
+        user_id,
+        &payload.account_data.sends,
+        &now,
+        batch_size,
+    )
+    .await?;
+
     // Generate new salt and hash the new password
     let new_salt = generate_salt()?;
     let password_iterations = server_password_iterations(&env) as i32;
@@ -938,6 +951,8 @@ pub async fn post_rotatekey(
     .map_err(|_| AppError::Database)?
     .run()
     .await?;
+
+    notifications::publish_user_logout((*env).clone(), claims.sub, now, Some(claims.device));
 
     Ok(Json(json!({})))
 }
@@ -1022,7 +1037,7 @@ pub async fn post_kdf(
 
     // Generate new security stamp
     let new_security_stamp = Uuid::new_v4().to_string();
-    let now = Utc::now().to_rfc3339();
+    let now = db::now_string();
 
     // Determine kdf_memory and kdf_parallelism based on KDF type
     let (final_kdf_memory, final_kdf_parallelism) = if kdf_type == KDF_TYPE_ARGON2ID {
@@ -1054,6 +1069,65 @@ pub async fn post_kdf(
     .map_err(|_| AppError::Database)?
     .run()
     .await?;
+
+    notifications::publish_user_logout((*env).clone(), claims.sub, now, Some(claims.device));
+
+    Ok(Json(json!({})))
+}
+
+/// POST /api/accounts/security-stamp - invalidates all tokens and forces logout
+#[worker::send]
+pub async fn post_sstamp(
+    claims: Claims,
+    State(env): State<Arc<Env>>,
+    Json(payload): Json<PasswordOrOtpData>,
+) -> Result<Json<Value>, AppError> {
+    let db = db::get_db(&env)?;
+    let user_id = &claims.sub;
+
+    // Load the user to verify credentials
+    let user: User = db
+        .prepare("SELECT * FROM users WHERE id = ?1")
+        .bind(&[user_id.clone().into()])?
+        .first(None)
+        .await
+        .map_err(|_| AppError::Database)?
+        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
+
+    // Require master password hash (OTP not supported)
+    let provided_hash = payload
+        .master_password_hash
+        .ok_or_else(|| AppError::BadRequest("Missing master password hash".to_string()))?;
+
+    let verification = user.verify_master_password(&provided_hash).await?;
+    if !verification.is_valid() {
+        return Err(AppError::Unauthorized("Invalid password".to_string()));
+    }
+
+    push::unregister_push_devices_by_user(&env, user_id).await;
+
+    // Delete all device rows — this revokes every refresh token and 2FA-remember token
+    Device::delete_all_by_user(&db, user_id).await?;
+
+    // Rotate the security stamp so all existing access tokens become invalid immediately
+    let new_security_stamp = Uuid::new_v4().to_string();
+    let now = db::now_string();
+
+    query!(
+        &db,
+        "UPDATE users SET security_stamp = ?1, updated_at = ?2 WHERE id = ?3",
+        new_security_stamp,
+        now,
+        user_id
+    )
+    .map_err(|_| AppError::Database)?
+    .run()
+    .await?;
+
+    // Known issue: Logout push for mobile devices will be skiped since the records of devices are deleted.
+    // Notifications are sent in background via waitUntil,
+    // so putting it ahead of device deletion is not guaranteed to send the logout push before the deletion.
+    notifications::publish_user_logout((*env).clone(), claims.sub, now, None);
 
     Ok(Json(json!({})))
 }

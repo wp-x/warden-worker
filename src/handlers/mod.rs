@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod attachments;
+pub mod auth_requests;
 pub mod ciphers;
 pub mod config;
 pub mod devices;
@@ -10,6 +11,8 @@ pub mod identity;
 pub mod import;
 pub mod meta;
 pub mod purge;
+pub mod sends;
+pub mod streaming;
 pub mod sync;
 pub mod twofactor;
 pub mod webauth;
