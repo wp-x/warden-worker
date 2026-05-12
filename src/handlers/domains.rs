@@ -1,13 +1,19 @@
 use axum::{extract::State, Json};
-use chrono::Utc;
 use log::warn;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use worker::{query, Env};
+use worker::Env;
+
+use crate::d1_query;
 
 use crate::handlers::ciphers::RawJson;
-use crate::{auth::Claims, db, error::AppError};
+use crate::{
+    auth::Claims,
+    db,
+    error::AppError,
+    notifications::{self, UpdateType},
+};
 
 /// Build `globalEquivalentDomains` JSON (as a raw JSON string) in SQLite/D1.
 ///
@@ -16,7 +22,7 @@ use crate::{auth::Claims, db, error::AppError};
 ///
 /// This keeps the Worker from parsing the large upstream dataset.
 pub(crate) async fn global_equivalent_domains_json(
-    db: &worker::D1Database,
+    db: &crate::db::Db,
     excluded_globals_json: &str,
     include_excluded: bool,
 ) -> String {
@@ -57,7 +63,7 @@ SELECT COALESCE(
 "#
     };
 
-    async fn run_once(db: &worker::D1Database, sql: &str, excluded: &str) -> Result<String, ()> {
+    async fn run_once(db: &crate::db::Db, sql: &str, excluded: &str) -> Result<String, ()> {
         let row: Option<Value> = db
             .prepare(sql)
             .bind(&[excluded.to_string().into()])
@@ -170,8 +176,8 @@ pub async fn post_domains(
     let equivalent_domains_json = serde_json::to_string(&equivalent_domains)
         .map_err(|_| AppError::BadRequest("Invalid equivalent domains".to_string()))?;
 
-    let now = Utc::now().to_rfc3339();
-    query!(
+    let now = db::now_string();
+    d1_query!(
         &db,
         "UPDATE users SET equivalent_domains = ?1, excluded_globals = ?2, updated_at = ?3 WHERE id = ?4",
         equivalent_domains_json,
@@ -183,6 +189,14 @@ pub async fn post_domains(
     .run()
     .await
     .map_err(|_| AppError::Database)?;
+
+    notifications::publish_user_update(
+        (*env).clone(),
+        claims.sub,
+        UpdateType::SyncSettings,
+        now,
+        Some(claims.device),
+    );
 
     Ok(Json(json!({})))
 }

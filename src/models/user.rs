@@ -1,6 +1,8 @@
 use constant_time_eq::constant_time_eq;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
+use crate::d1_query;
 use crate::{crypto::verify_password, error::AppError};
 
 fn default_json_array_string() -> String {
@@ -59,6 +61,17 @@ impl PasswordVerification {
 }
 
 impl User {
+    pub async fn find_by_email(db: &crate::db::Db, email: &str) -> Result<Option<Self>, AppError> {
+        let row: Option<Value> = d1_query!(db, "SELECT * FROM users WHERE email = ?1", email)
+            .map_err(|_| AppError::Database)?
+            .first(None)
+            .await
+            .map_err(|_| AppError::Database)?;
+
+        row.map(|row| serde_json::from_value(row).map_err(|_| AppError::Internal))
+            .transpose()
+    }
+
     pub async fn verify_master_password(
         &self,
         provided_hash: &str,
@@ -181,42 +194,18 @@ pub struct ChangePasswordRequest {
 }
 
 // For POST /accounts/kdf request - Change KDF settings
-//
-// API Format History:
-// - Bitwarden switched to complex format in v2025.10.0
-// - Vaultwarden followed in PR #6458, WITHOUT backward compatibility
-// - We implement backward compatibility to support both formats
-//
-// Supports two formats:
-//
-// 1. Simple/Legacy format (Bitwarden < v2025.10.0, e.g. web vault 2025.07):
-// {
-//   "kdf": 0,
-//   "kdfIterations": 650000,
-//   "kdfMemory": null,
-//   "kdfParallelism": null,
-//   "key": "...",
-//   "masterPasswordHash": "...",
-//   "newMasterPasswordHash": "..."
-// }
-//
-// 2. Complex format (Bitwarden >= v2025.10.0, e.g. official client 2025.11.x):
-// {
-//   "authenticationData": { "kdf": {...}, "masterPasswordAuthenticationHash": "...", "salt": "..." },
-//   "unlockData": { "kdf": {...}, "masterKeyWrappedUserKey": "...", "salt": "..." },
-//   "key": "...",
-//   "masterPasswordHash": "...",
-//   "newMasterPasswordHash": "..."
-// }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct KdfParams {
     #[serde(alias = "kdfType")]
-    pub kdf_type: i32,
-    pub iterations: i32,
-    pub memory: Option<i32>,
-    pub parallelism: Option<i32>,
+    pub kdf: i32,
+    #[serde(alias = "iterations")]
+    pub kdf_iterations: i32,
+    #[serde(alias = "memory")]
+    pub kdf_memory: Option<i32>,
+    #[serde(alias = "parallelism")]
+    pub kdf_parallelism: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -238,60 +227,13 @@ pub struct UnlockData {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeKdfRequest {
-    // Common fields (both formats)
+    #[allow(dead_code)]
     pub key: String,
     pub master_password_hash: String,
+    #[allow(dead_code)]
     pub new_master_password_hash: String,
-
-    // Simple format fields (optional)
-    pub kdf: Option<i32>,
-    pub kdf_iterations: Option<i32>,
-    pub kdf_memory: Option<i32>,
-    pub kdf_parallelism: Option<i32>,
-
-    // Complex format fields (optional)
-    pub authentication_data: Option<AuthenticationData>,
-    pub unlock_data: Option<UnlockData>,
-}
-
-impl ChangeKdfRequest {
-    /// Extract KDF parameters from either simple or complex format
-    pub fn get_kdf_params(&self) -> Option<(i32, i32, Option<i32>, Option<i32>)> {
-        // Try complex format first (unlock_data takes precedence)
-        if let Some(ref unlock_data) = self.unlock_data {
-            return Some((
-                unlock_data.kdf.kdf_type,
-                unlock_data.kdf.iterations,
-                unlock_data.kdf.memory,
-                unlock_data.kdf.parallelism,
-            ));
-        }
-
-        // Fall back to simple format
-        if let (Some(kdf), Some(iterations)) = (self.kdf, self.kdf_iterations) {
-            return Some((kdf, iterations, self.kdf_memory, self.kdf_parallelism));
-        }
-
-        None
-    }
-
-    /// Get the new password hash to store (from authentication_data if available)
-    pub fn get_new_password_hash(&self) -> &str {
-        if let Some(ref auth_data) = self.authentication_data {
-            &auth_data.master_password_authentication_hash
-        } else {
-            &self.new_master_password_hash
-        }
-    }
-
-    /// Get the new encrypted user key (from unlock_data if available, else from key)
-    pub fn get_new_key(&self) -> &str {
-        if let Some(ref unlock_data) = self.unlock_data {
-            &unlock_data.master_key_wrapped_user_key
-        } else {
-            &self.key
-        }
-    }
+    pub authentication_data: AuthenticationData,
+    pub unlock_data: UnlockData,
 }
 
 // For POST /accounts/key-management/rotate-user-account-keys request
@@ -334,6 +276,8 @@ pub struct RotateAccountKeys {
 pub struct RotateAccountData {
     pub ciphers: Vec<crate::models::cipher::CipherRequestData>,
     pub folders: Vec<RotateFolderData>,
+    #[serde(default)]
+    pub sends: Vec<crate::models::send::SendRequestData>,
 }
 
 #[derive(Debug, Deserialize)]

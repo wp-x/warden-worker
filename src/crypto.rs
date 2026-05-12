@@ -60,6 +60,56 @@ pub fn pbkdf2_sha256(
     Ok(out)
 }
 
+/// Derives a key using PBKDF2-HMAC-SHA256 via Web Crypto API (hardware-accelerated, zero CPU cost).
+///
+/// Workers WebCrypto limits PBKDF2 to <= 100,000 iterations.
+/// Use for Send passwords and other low-iteration use cases.
+pub async fn webcrypto_pbkdf2_sha256(
+    password: &[u8],
+    salt: &[u8],
+    iterations: u32,
+    key_length_bits: u32,
+) -> Result<Vec<u8>, AppError> {
+    let subtle = subtle_crypto()?;
+    // Import the password as a raw key material
+    let password_array = Uint8Array::new_from_slice(password);
+    let base_key = JsFuture::from(
+        subtle
+            .import_key_with_str(
+                "raw",
+                password_array.as_ref(),
+                "PBKDF2",
+                false,
+                &js_sys::Array::of1(&JsValue::from_str("deriveBits")),
+            )
+            .map_err(|e| AppError::Crypto(format!("PBKDF2 import_key failed: {e:?}")))?,
+    )
+    .await
+    .map_err(|e| AppError::Crypto(format!("PBKDF2 import_key await failed: {e:?}")))?;
+    let salt_array = Uint8Array::new_from_slice(salt);
+    // Define PBKDF2 parameters
+    let derive_params = web_sys::Pbkdf2Params::new(
+        "PBKDF2",
+        JsValue::from_str("SHA-256").as_ref(),
+        iterations,
+        salt_array.as_ref(),
+    );
+    // Derive the bits
+    let derived = JsFuture::from(
+        subtle
+            .derive_bits_with_object(
+                derive_params.as_ref(),
+                &CryptoKey::from(base_key),
+                key_length_bits,
+            )
+            .map_err(|e| AppError::Crypto(format!("PBKDF2 deriveBits failed: {e:?}")))?,
+    )
+    .await
+    .map_err(|e| AppError::Crypto(format!("PBKDF2 deriveBits await failed: {e:?}")))?;
+
+    Ok(Uint8Array::new(&derived).to_vec())
+}
+
 /// Generates a cryptographically secure random salt.
 pub fn generate_salt() -> Result<String, AppError> {
     let crypto = get_crypto()?;

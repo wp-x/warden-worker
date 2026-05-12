@@ -51,6 +51,43 @@ pub struct CipherData {
     pub type_fields: CipherTypeFields,
 }
 
+impl CipherTypeFields {
+    fn normalize_for_storage(mut self) -> Self {
+        self.password_history = {
+            match self.password_history {
+                Some(Value::Array(entries)) => Some(Value::Array(
+                    entries
+                        .into_iter()
+                        .filter_map(normalize_password_history_entry)
+                        .collect(),
+                )),
+                Some(_) => Some(Value::Array(Vec::new())),
+                None => None,
+            }
+        };
+        self
+    }
+}
+
+impl CipherData {
+    pub fn new(name: String, notes: Option<String>, type_fields: CipherTypeFields) -> Self {
+        Self {
+            name,
+            notes,
+            type_fields: type_fields.normalize_for_storage(),
+        }
+    }
+}
+
+fn normalize_password_history_entry(entry: Value) -> Option<Value> {
+    match entry {
+        Value::Object(map) if matches!(map.get("password"), Some(Value::String(_))) => {
+            Some(Value::Object(map))
+        }
+        _ => None,
+    }
+}
+
 // Custom deserialization function for booleans
 fn deserialize_bool_from_int<'de, D>(deserializer: D) -> Result<bool, D::Error>
 where
@@ -127,6 +164,8 @@ pub struct Cipher {
     pub folder_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 
@@ -158,6 +197,7 @@ pub struct CipherDBModel {
     pub favorite: i32,
     pub folder_id: Option<String>,
     pub deleted_at: Option<String>,
+    pub archived_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -173,6 +213,7 @@ impl From<CipherDBModel> for Cipher {
             favorite: val.favorite != 0,
             folder_id: val.folder_id,
             deleted_at: val.deleted_at,
+            archived_at: val.archived_at,
             created_at: val.created_at,
             updated_at: val.updated_at,
             object: default_object(),
@@ -222,6 +263,7 @@ impl Serialize for Cipher {
         response_map.insert("revisionDate".to_string(), json!(self.updated_at));
         response_map.insert("creationDate".to_string(), json!(self.created_at));
         response_map.insert("deletedDate".to_string(), json!(self.deleted_at));
+        response_map.insert("archivedDate".to_string(), json!(self.archived_at));
         response_map.insert("attachments".to_string(), json!(self.attachments));
 
         if let Some(data_obj) = self.data.as_object() {

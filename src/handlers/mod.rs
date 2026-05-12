@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod attachments;
+pub mod auth_requests;
 pub mod ciphers;
 pub mod config;
 pub mod devices;
@@ -10,6 +11,8 @@ pub mod identity;
 pub mod import;
 pub mod meta;
 pub mod purge;
+pub mod sends;
+pub mod streaming;
 pub mod sync;
 pub mod twofactor;
 pub mod webauth;
@@ -111,7 +114,7 @@ pub(crate) fn sync_response_prealloc_bytes(env: &worker::Env) -> Option<usize> {
 
 /// Whether the user has 2FA enabled.
 pub(crate) async fn two_factor_enabled(
-    db: &worker::D1Database,
+    db: &crate::db::Db,
     user_id: &str,
 ) -> Result<bool, crate::error::AppError> {
     let twofactors = crate::handlers::twofactor::list_user_twofactors(db, user_id).await?;

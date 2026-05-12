@@ -7,14 +7,17 @@
 
   Usage:
   - After CI/CD or local download of bw_web_builds and extraction, keep `public/web-vault/` as the static resource root directory.
-  - Run: `bash scripts/apply-web-vault-overrides.sh public/web-vault`
-    which will copy this file (public/css/vaultwarden.css) to `public/web-vault/css/vaultwarden.css`.
+  - Run: `mkdir -p public/web-vault/css/ && cp public/css/vaultwarden.css public/web-vault/css/`
 */
 
 /* Hide unsupported UI elements */
 .vw-hide,
 bit-nav-item[route="settings/subscription"],
 a[href$="/settings/sponsored-families"],
+
+/* Unsupported forwarding email alias options */
+ng-dropdown-panel div.ng-dropdown-panel-items div:has(> [title="Firefox Relay"]),
+ng-dropdown-panel div.ng-dropdown-panel-items div:has(> [title="DuckDuckGo"]),
 
 /* SSO UI (newer builds, if present) */
 .vw-email-sso,
@@ -24,11 +27,6 @@ a[href$="/settings/sponsored-families"],
 
 /* Passkey/WebAuthn login UI (newer builds, if present) */
 .vw-passkey-login,
-
-/* Legacy selectors for older web vault builds (< 2025.5.1) */
-app-root ng-component > form > div:nth-child(1) > div > button[buttontype="secondary"].\!tw-text-primary-600:nth-child(4),
-app-root ng-component > form > div:nth-child(1) > div > button[buttontype="secondary"].\!tw-text-primary-600:nth-child(3),
-app-root ng-component > form > div:nth-child(1) > div:nth-child(3) > div:nth-child(2),
 
 /* Org-related / enterprise UI */
 app-organization-plans > form > bit-section:nth-child(2),
@@ -41,7 +39,7 @@ bit-dialog div.tw-col-span-4:has(input[formcontrolname*="access"], input[formcon
 app-security > app-two-factor-setup > form,
 app-user-layout app-danger-zone button:nth-child(1),
 
-/* Two-factor providers (hide unsupported ones; keep authenticator/TOTP visible) */
+/* Two-factor providers (hide unsupported ones) */
 /* Email */
 .providers-2fa-1,
 
@@ -54,9 +52,8 @@ app-user-layout app-danger-zone button:nth-child(1),
 /* WebAuthn */
 .providers-2fa-7,
 
-/* Emergency access & Sends (not supported) */
+/* Emergency access (not supported) */
 bit-nav-item[route="settings/emergency-access"],
-bit-nav-item[route="sends"],
 
 /* Passkey settings (not supported) */
 app-user-layout app-password-settings app-webauthn-login-settings {
